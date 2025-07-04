@@ -1,4 +1,4 @@
-. Key Deliveries / Accomplishments
+i. Key Deliveries / Accomplishments
 
 Successfully delivered [Project/Initiative name], meeting all key milestones on time and within scope.
 
@@ -50,4 +50,18 @@ Continue to develop data-driven storytelling to better influence stakeholders an
 
 Work on improving time management during peak delivery phases to better balance quality and speed.
 
+Successfully contributed to the .NET 8 upgrade, ensuring application compatibility and performance enhancements.
 
+Completed FDNS switch from TX to VA, supporting infrastructure changes with minimal disruption.
+
+Played a key role in the ARM API migration from SOAP to REST, improving API performance and maintainability.
+
+Ensured ARM request support across all use cases, validating seamless system functionality.
+
+Coordinated with the CDSN team to enable CDSN access for EPAM IDs, facilitating secure user provisioning.
+
+Worked on OAuth Digicert upgrade, performing validation and testing to ensure secure authentication mechanisms.
+
+Addressed and resolved Aquascan vulnerabilities, strengthening application security posture.
+
+Assisted team members with Dynatrace setup and deployment, specifically for queries in IIS and OpenShift environments.
