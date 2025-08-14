@@ -1,0 +1,57 @@
+# Path to server list and output
+$servers = Get-Content "C:\Path\servers.txt"
+$output = @()
+
+foreach ($server in $servers) {
+    Write-Host "Scanning $server..."
+
+    Invoke-Command -ComputerName $server -ScriptBlock {
+        # --- Get .NET Framework versions ---
+        $frameworks = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP' -Recurse |
+            Get-ItemProperty -Name Version -ErrorAction SilentlyContinue |
+            Where-Object { $_.Version -match '^\d' } |
+            Select-Object @{Name="Server";Expression={$env:COMPUTERNAME}},
+                          @{Name="Type";Expression={"NET Framework"}},
+                          @{Name="Version";Expression={$_.Version}},
+                          @{Name="Application";Expression={"N/A"}}
+
+        # --- Get .NET Core / .NET versions ---
+        $dotnetCore = @()
+        $dotnetPath = "C:\Program Files\dotnet\dotnet.exe"
+        if (Test-Path $dotnetPath) {
+            $sdks = & $dotnetPath --list-sdks
+            $runtimes = & $dotnetPath --list-runtimes
+            $dotnetCore += ($sdks + $runtimes) | ForEach-Object {
+                [PSCustomObject]@{
+                    Server      = $env:COMPUTERNAME
+                    Type        = ".NET Core/5+"
+                    Version     = $_
+                    Application = "N/A"
+                }
+            }
+        }
+
+        # --- Get IIS app framework targets ---
+        $iisApps = @()
+        if (Get-Module -ListAvailable WebAdministration) {
+            Import-Module WebAdministration
+            $sites = Get-ChildItem IIS:\Sites
+            foreach ($site in $sites) {
+                $targetFw = (Get-WebConfigurationProperty -Filter system.web/compilation `
+                              -PSPath "IIS:\Sites\$($site.Name)" -Name targetFramework).Value
+                $iisApps += [PSCustomObject]@{
+                    Server      = $env:COMPUTERNAME
+                    Type        = "IIS App"
+                    Version     = $targetFw
+                    Application = $site.Name
+                }
+            }
+        }
+
+        return $frameworks + $dotnetCore + $iisApps
+    } -ErrorAction SilentlyContinue | ForEach-Object { $output += $_ }
+}
+
+# Export results
+$output | Export-Csv "C:\Path\dotnet_inventory.csv" -NoTypeInformation
+Write-Host "Report saved to C:\Path\dotnet_inventory.csv"
