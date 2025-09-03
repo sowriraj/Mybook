@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# =========================
+# Source database credentials
+# =========================
+SOURCE_USER=dummy
+SOURCE_PASS=dummy
+SOURCE_TNS=dummy
+SOURCE_SCHEMA=dummy
+
+# =========================
+# Target database credentials
+# =========================
+TARGET_USER=dummy
+TARGET_PASS=dummy
+TARGET_TNS=dummy
+TARGET_SCHEMA=dummy
+
+# =========================
+# Directory for temporary SQL files
+# =========================
+TEMP_DIR="C:\\Downloads\\export\\oracle_exports"
+mkdir -p "$TEMP_DIR"
+
+# =========================
+# Check ORACLE_HOME
+# =========================
+if [ -z "$ORACLE_HOME" ]; then
+  echo "Error: ORACLE_HOME is not set. Please set it before running the script."
+  exit 1
+fi
+
+# =========================
+# List of tables to copy
+# =========================
+TABLES=("dummy" "dummy")  # Add more tables if needed
+
+# =========================
+# Loop through each table
+# =========================
+for TABLE in "${TABLES[@]}"; do
+  echo "Processing table: $TABLE"
+
+  EXPORT_SQL="$TEMP_DIR/${TABLE}_export.sql"
+
+  # Step 1: Export data as INSERT statements with schema
+  $ORACLE_HOME/bin/sqlplus -s "$SOURCE_USER/$SOURCE_PASS@$SOURCE_TNS" <<EOF
+SET HEADING OFF
+SET FEEDBACK OFF
+SET PAGESIZE 0
+SET LONG 100000
+SET LONGCHUNKSIZE 100000
+SET LINESIZE 10000
+SET TRIMSPOOL ON
+SET TERMOUT OFF
+SPOOL $EXPORT_SQL
+
+SELECT 'INSERT INTO $TARGET_SCHEMA.$TABLE (' ||
+       LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_ID) ||
+       ') VALUES (' ||
+       LISTAGG('''' || REPLACE(''||COLUMN_NAME||'', '''', '''''') || '''', ',')
+       WITHIN GROUP (ORDER BY COLUMN_ID) ||
+       ');'
+FROM (SELECT COLUMN_NAME, COLUMN_ID 
+        FROM ALL_TAB_COLUMNS
+       WHERE TABLE_NAME=UPPER('$TABLE') 
+         AND OWNER=UPPER('$SOURCE_SCHEMA')
+       ORDER BY COLUMN_ID);
+
+SPOOL OFF
+EXIT
+EOF
+
+  if [ $? -ne 0 ]; then
+    echo "Error: Export failed for $TABLE"
+    continue
+  fi
+
+  # Step 2: Run the generated INSERTs on target DB
+  $ORACLE_HOME/bin/sqlplus -s "$TARGET_USER/$TARGET_PASS@$TARGET_TNS" @"$EXPORT_SQL"
+
+  if [ $? -ne 0 ]; then
+    echo "Error: Import failed for $TABLE"
+    continue
+  fi
+
+  echo "Successfully copied table: $TABLE"
+done
+
+echo "All done!"
