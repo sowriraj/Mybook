@@ -1,0 +1,167 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+###############################################################################
+# copy_table.sh
+# - Build dynamic SELECT (all columns)
+# - Export CSV (quoted, cleans CR/LF & escapes quotes)
+# - Generate control file dynamically (NVL for NOT NULL cols)
+# - Load CSV into target DB via SQL*Loader
+#
+# Requirements: sqlplus and sqlldr must be installed and in PATH.
+# Edit CONFIG section below before running.
+###############################################################################
+
+###############################
+# CONFIG - edit these values
+###############################
+SRC_USER="src_user"
+SRC_PASS="src_pass"
+SRC_DB="src_db"                # connect string, e.g. ORCL or host:port/service
+SRC_SCHEMA="SRC_SCHEMA_NAME"   # source schema (owner)
+
+TGT_USER="tgt_user"
+TGT_PASS="tgt_pass"
+TGT_DB="tgt_db"
+TGT_SCHEMA="TGT_SCHEMA_NAME"   # target schema (owner)
+
+TABLE_NAME="Tabl1"
+
+EXPORT_DIR="/tmp/db_exports"
+mkdir -p "${EXPORT_DIR}"
+
+DATA_FILE="${EXPORT_DIR}/${TABLE_NAME}.csv"
+CTL_FILE="${EXPORT_DIR}/${TABLE_NAME}.ctl"
+LOG_FILE="${EXPORT_DIR}/${TABLE_NAME}.log"
+BAD_FILE="${EXPORT_DIR}/${TABLE_NAME}.bad"
+DISC_FILE="${EXPORT_DIR}/${TABLE_NAME}.dsc"
+COLS_TMP="${EXPORT_DIR}/${TABLE_NAME}_cols.tmp"
+
+###############################
+# STEP 1: Build dynamic SELECT (SQL string)
+###############################
+echo "STEP 1: Building dynamic SELECT for ${SRC_SCHEMA}.${TABLE_NAME} ..."
+
+# This SQL builds a SELECT statement that:
+#  - wraps each column in double-quotes using CHR(34)
+#  - replaces CR/LF with space
+#  - doubles any double-quote inside values (CSV escaping)
+#  - concatenates columns with || ',' ||
+EXPORT_SQL=$(sqlplus -s "${SRC_USER}/${SRC_PASS}@${SRC_DB}" <<SQL
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 TRIMSPOOL ON LINESIZE 32767
+SELECT 'SELECT ' ||
+       LISTAGG(
+         'CHR(34) || REPLACE(REPLACE(REPLACE(NVL(TO_CHAR(' || column_name || '),''''),CHR(10),'' ''),CHR(13),'' ''),CHR(34),CHR(34)||CHR(34)) || CHR(34)'
+       , ' || '','' || '
+       ) WITHIN GROUP (ORDER BY column_id)
+  || ' FROM ' || owner || '.' || table_name
+FROM all_tab_columns
+WHERE owner = UPPER('${SRC_SCHEMA}')
+  AND table_name = UPPER('${TABLE_NAME}');
+EXIT
+SQL
+)
+
+# Trim leading/trailing whitespace
+EXPORT_SQL="$(echo "${EXPORT_SQL}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+if [ -z "${EXPORT_SQL}" ]; then
+  echo "ERROR: Failed to generate export SELECT. Check SRC parameters and that table exists."
+  exit 2
+fi
+
+echo "Export SELECT built."
+
+###############################
+# STEP 2: Export data to CSV
+###############################
+echo "STEP 2: Exporting data to CSV -> ${DATA_FILE} ..."
+# Use unquoted heredoc so $EXPORT_SQL expands
+sqlplus -s "${SRC_USER}/${SRC_PASS}@${SRC_DB}" <<SQL
+SET HEADING OFF
+SET FEEDBACK OFF
+SET PAGESIZE 0
+SET TRIMSPOOL ON
+SET LINESIZE 32767
+SET TERMOUT OFF
+SPOOL ${DATA_FILE}
+${EXPORT_SQL};
+SPOOL OFF
+EXIT
+SQL
+
+echo "CSV exported: ${DATA_FILE}"
+wc -l "${DATA_FILE}" || true
+
+###############################
+# STEP 3: Generate control file dynamically
+###############################
+echo "STEP 3: Generating control file -> ${CTL_FILE} ..."
+
+# Produce a temp file with column mapping lines using target metadata:
+# - For NOT NULL columns -> use NVL(:col,'NA') (so ORA-01400 avoided)
+# - For nullable columns -> use CHAR(length)
+sqlplus -s "${TGT_USER}/${TGT_PASS}@${TGT_DB}" <<SQL > "${COLS_TMP}"
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 TRIMSPOOL ON
+SELECT '  ' || column_name ||
+       CASE
+         WHEN nullable = 'N'
+           THEN ' \"NVL(:' || column_name || ',''NA'')\",'
+         ELSE ' CHAR(' || data_length || '),'
+       END
+FROM all_tab_columns
+WHERE owner = UPPER('${TGT_SCHEMA}')
+  AND table_name = UPPER('${TABLE_NAME}')
+ORDER BY column_id;
+EXIT
+SQL
+
+# Remove trailing comma from last column line
+if [ -s "${COLS_TMP}" ]; then
+  sed -i '$ s/,$//' "${COLS_TMP}"
+else
+  echo "ERROR: No column metadata retrieved for ${TGT_SCHEMA}.${TABLE_NAME}. Check target schema/table."
+  exit 3
+fi
+
+# Write final control file
+cat > "${CTL_FILE}" <<EOF
+LOAD DATA
+INFILE '${DATA_FILE}'
+INTO TABLE ${TGT_SCHEMA}.${TABLE_NAME}
+APPEND
+FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"'
+TRAILING NULLCOLS
+(
+EOF
+
+# Append column mappings
+cat "${COLS_TMP}" >> "${CTL_FILE}"
+
+# Close parenthesis
+cat >> "${CTL_FILE}" <<EOF
+)
+EOF
+
+echo "Control file generated: ${CTL_FILE}"
+echo "----- BEGIN ${CTL_FILE} -----"
+sed -n '1,200p' "${CTL_FILE}"
+echo "----- END ${CTL_FILE} -----"
+
+###############################
+# STEP 4: Load into target DB
+###############################
+echo "STEP 4: Running SQL*Loader..."
+sqlldr "${TGT_USER}/${TGT_PASS}@${TGT_DB}" control="${CTL_FILE}" log="${LOG_FILE}" bad="${BAD_FILE}" discard="${DISC_FILE}"
+
+echo "SQL*Loader finished. Check logs:"
+echo "  LOG : ${LOG_FILE}"
+echo "  BAD : ${BAD_FILE}"
+echo "  DSC : ${DISC_FILE}"
+
+# optional: show summary lines from log
+echo "Load summary (last 20 lines of log):"
+tail -n 20 "${LOG_FILE}" || true
+
+echo "All done. Files saved in: ${EXPORT_DIR}"
